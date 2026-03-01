@@ -156,6 +156,10 @@ async function startServer() {
   });
 
   // API Routes
+  app.get("/api/health", (req, res) => {
+    res.json({ status: "ok", env: process.env.NODE_ENV, database: "sqlite" });
+  });
+
   app.get("/api/prices", (req, res) => {
     try {
       const prices = db.prepare("SELECT * FROM average_prices").all();
@@ -188,6 +192,11 @@ async function startServer() {
     }
   });
 
+  // Catch-all for unmatched API routes to prevent HTML responses
+  app.use("/api", (req, res) => {
+    res.status(404).json({ error: `API endpoint not found: ${req.method} ${req.originalUrl}` });
+  });
+
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
@@ -206,12 +215,28 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`[SERVER] Running on http://0.0.0.0:${PORT}`);
-    console.log(`[SERVER] NODE_ENV: ${process.env.NODE_ENV}`);
-  });
+  const port = Number(process.env.PORT) || 3000;
+  // Only listen if we're not running as a Vercel function
+  if (process.env.VERCEL !== '1') {
+    app.listen(port, "0.0.0.0", () => {
+      console.log(`[SERVER] Running on http://0.0.0.0:${port}`);
+      console.log(`[SERVER] NODE_ENV: ${process.env.NODE_ENV}`);
+    });
+  }
+
+  return app;
 }
 
-startServer().catch(err => {
+const appPromise = startServer().catch(err => {
   console.error("[SERVER] Failed to start:", err);
 });
+
+// For Vercel compatibility
+export default async (req: any, res: any) => {
+  const app = await appPromise;
+  if (!app) {
+    res.status(500).send("Server failed to initialize");
+    return;
+  }
+  return app(req, res);
+};
