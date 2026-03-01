@@ -607,6 +607,14 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(authForm)
       });
+      
+      const contentType = res.headers.get("content-type");
+      if (!contentType || !contentType.includes("application/json")) {
+        const text = await res.text();
+        console.error("Unexpected response from server:", text);
+        throw new Error(`The server returned an unexpected response (HTML instead of JSON). This usually means the API route was not found. Response starts with: ${text.substring(0, 50)}...`);
+      }
+
       const data = await res.json();
       if (!res.ok) {
         if (authMode === 'signup' && data.error === "Email already exists") {

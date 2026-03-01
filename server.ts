@@ -5,6 +5,10 @@ import Database from "better-sqlite3";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import cookieParser from "cookie-parser";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const db = new Database("claims.db");
 const JWT_SECRET = process.env.JWT_SECRET || "claim-guardian-secret-key-123";
@@ -75,6 +79,12 @@ async function startServer() {
 
   app.use(express.json({ limit: '10mb' }));
   app.use(cookieParser());
+
+  // Logging middleware
+  app.use((req, res, next) => {
+    console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
+    next();
+  });
 
   // Auth Middleware
   const authenticate = (req: any, res: any, next: any) => {
@@ -181,20 +191,27 @@ async function startServer() {
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { 
+        middlewareMode: true,
+        hmr: process.env.DISABLE_HMR === 'true' ? false : { overlay: false },
+        watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      },
       appType: "spa",
     });
     app.use(vite.middlewares);
   } else {
-    app.use(express.static(path.join(process.cwd(), "dist")));
+    app.use(express.static(path.join(__dirname, "dist")));
     app.get("*", (req, res) => {
-      res.sendFile(path.join(process.cwd(), "dist", "index.html"));
+      res.sendFile(path.join(__dirname, "dist", "index.html"));
     });
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`[SERVER] Running on http://0.0.0.0:${PORT}`);
+    console.log(`[SERVER] NODE_ENV: ${process.env.NODE_ENV}`);
   });
 }
 
-startServer();
+startServer().catch(err => {
+  console.error("[SERVER] Failed to start:", err);
+});
