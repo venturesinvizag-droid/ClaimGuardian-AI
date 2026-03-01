@@ -126,9 +126,6 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const resultsRef = useRef<HTMLDivElement>(null);
 
-  // Initialize Gemini
-  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
-
   // GA4 Integration
   useEffect(() => {
     const measurementId = import.meta.env.VITE_GA_MEASUREMENT_ID;
@@ -382,6 +379,11 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
     setLoading(true);
     setError(null);
     try {
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        throw new Error("Gemini API key is not configured. Please set GEMINI_API_KEY in your environment.");
+      }
+      const ai = new GoogleGenAI({ apiKey });
       const base64Data = preview.split(',')[1];
       
       const response = await ai.models.generateContent({
@@ -515,6 +517,11 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
     
     setIsGeneratingLetter(true);
     try {
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        throw new Error("Gemini API key is not configured. Please set GEMINI_API_KEY in your environment.");
+      }
+      const ai = new GoogleGenAI({ apiKey });
       const flaggedItems = results.filter(r => r.isOvercharged);
       const currentDate = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
       
