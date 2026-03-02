@@ -121,7 +121,8 @@ async function startServer() {
       res.cookie("token", token, { httpOnly: true, secure: true, sameSite: 'none' });
       res.json({ id: info.lastInsertRowid, email, full_name });
     } catch (err: any) {
-      if (err.message.includes("UNIQUE constraint failed")) {
+      console.error("[SIGNUP ERROR]", err);
+      if (err?.message?.includes("UNIQUE constraint failed")) {
         return res.status(400).json({ error: "Email already exists" });
       }
       res.status(500).json({ error: "Signup failed" });
@@ -140,6 +141,7 @@ async function startServer() {
       res.cookie("token", token, { httpOnly: true, secure: true, sameSite: 'none' });
       res.json({ id: user.id, email, full_name: user.full_name, address: user.address, phone: user.phone });
     } catch (err) {
+      console.error("[LOGIN ERROR]", err);
       res.status(500).json({ error: "Login failed" });
     }
   });
