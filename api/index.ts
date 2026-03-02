@@ -13,8 +13,9 @@ const __dirname = path.dirname(__filename);
 
 let db: any;
 try {
-  db = new Database("claims.db");
-  console.log("[DATABASE] Connected to SQLite");
+  const dbPath = path.join(process.cwd(), "claims.db");
+  db = new Database(dbPath);
+  console.log(`[DATABASE] Connected to SQLite at ${dbPath}`);
 } catch (err) {
   console.error("[DATABASE] Failed to connect to SQLite. Using in-memory database fallback.", err);
   db = new Database(":memory:");
@@ -223,9 +224,10 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    app.use(express.static(path.join(__dirname, "dist")));
+    const distPath = path.join(process.cwd(), "dist");
+    app.use(express.static(distPath));
     app.get("*", (req, res) => {
-      res.sendFile(path.join(__dirname, "dist", "index.html"));
+      res.sendFile(path.join(distPath, "index.html"));
     });
   }
 
