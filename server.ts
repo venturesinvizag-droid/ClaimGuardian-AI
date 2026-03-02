@@ -6,11 +6,20 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import cookieParser from "cookie-parser";
 import { fileURLToPath } from "url";
+import "dotenv/config";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const db = new Database("claims.db");
+let db: any;
+try {
+  db = new Database("claims.db");
+  console.log("[DATABASE] Connected to SQLite");
+} catch (err) {
+  console.error("[DATABASE] Failed to connect to SQLite. Using in-memory database fallback.", err);
+  db = new Database(":memory:");
+}
+
 const JWT_SECRET = process.env.JWT_SECRET || "claim-guardian-secret-key-123";
 
 // Initialize DB
@@ -194,7 +203,12 @@ async function startServer() {
 
   // Catch-all for unmatched API routes to prevent HTML responses
   app.use("/api", (req, res) => {
-    res.status(404).json({ error: `API endpoint not found: ${req.method} ${req.originalUrl}` });
+    console.warn(`[SERVER] 404 API Route: ${req.method} ${req.url}`);
+    res.status(404).json({ 
+      error: "API endpoint not found", 
+      method: req.method, 
+      path: req.originalUrl 
+    });
   });
 
   // Vite middleware for development

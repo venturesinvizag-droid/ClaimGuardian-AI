@@ -387,22 +387,20 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
       const base64Data = preview.split(',')[1];
       
       const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: [
-          {
-            parts: [
-              {
-                text: "Extract medical procedure codes (CPT/HCPCS) and their associated prices from this medical bill. Also extract the hospital name, hospital address, account number, date of service, and patient name. Return a JSON object with 'hospitalName', 'hospitalAddress', 'accountNumber', 'dateOfService', 'patientName', and a 'procedures' array containing objects with 'code', 'description', and 'price' (as a number). If a code is not found, try to infer it from the description or leave it blank."
-              },
-              {
-                inlineData: {
-                  mimeType: file.type,
-                  data: base64Data
-                }
+        model: "gemini-3.1-pro-preview",
+        contents: {
+          parts: [
+            {
+              text: "Extract medical procedure codes (CPT/HCPCS) and their associated prices from this medical bill. Also extract the hospital name, hospital address, account number, date of service, and patient name. Return a JSON object with 'hospitalName', 'hospitalAddress', 'accountNumber', 'dateOfService', 'patientName', and a 'procedures' array containing objects with 'code', 'description', and 'price' (as a number). If a code is not found, try to infer it from the description or leave it blank."
+            },
+            {
+              inlineData: {
+                mimeType: file.type,
+                data: base64Data
               }
-            ]
-          }
-        ],
+            }
+          ]
+        },
         config: {
           responseMimeType: "application/json",
           responseSchema: {
@@ -565,8 +563,8 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
       Format the response in clean Markdown as a ready-to-send email. Do not include placeholders if the information is provided above.`;
 
       const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: [{ parts: [{ text: prompt }] }]
+        model: "gemini-3.1-pro-preview",
+        contents: { parts: [{ text: prompt }] }
       });
 
       setDisputeLetter(response.text || "Failed to generate letter.");
@@ -608,11 +606,12 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
         body: JSON.stringify(authForm)
       });
       
+      console.log(`[AUTH] Response status: ${res.status}`);
       const contentType = res.headers.get("content-type");
       if (!contentType || !contentType.includes("application/json")) {
         const text = await res.text();
-        console.error("Unexpected response from server:", text);
-        throw new Error(`The server returned an unexpected response (HTML instead of JSON). This usually means the API route was not found. Response starts with: ${text.substring(0, 50)}...`);
+        console.error("[AUTH] Unexpected response from server:", text);
+        throw new Error(`The server returned an unexpected response (HTML instead of JSON). Status: ${res.status}. Response starts with: ${text.substring(0, 50)}...`);
       }
 
       const data = await res.json();
