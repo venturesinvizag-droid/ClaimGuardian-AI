@@ -6,11 +6,13 @@ import jwt from "jsonwebtoken";
 import cookieParser from "cookie-parser";
 import { fileURLToPath } from "url";
 import "dotenv/config";
+import { MockDatabase } from "./mock-db.ts";
+import { DatabaseAdapter, PostgresAdapter, SQLiteAdapter, MockAdapter } from "./db-adapter.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-let db: any;
+let db: DatabaseAdapter;
 
 async function startServer() {
   const app = express();
@@ -19,65 +21,79 @@ async function startServer() {
 
   // Initialize DB
   try {
-    if (process.env.VERCEL === '1') {
-      throw new Error("Running on Vercel, skipping better-sqlite3");
+    if (process.env.POSTGRES_URL) {
+      console.log("[DATABASE] Connecting to Vercel Postgres...");
+      db = new PostgresAdapter();
+    } else if (process.env.VERCEL === '1' || process.env.NODE_ENV === 'production') {
+      console.log("[DATABASE] Running in production/Vercel without Postgres, using MockDatabase");
+      db = new MockAdapter(new MockDatabase());
+    } else {
+      try {
+        const Database = (await import("better-sqlite3")).default;
+        const dbPath = path.join(process.cwd(), "claims.db");
+        db = new SQLiteAdapter(new Database(dbPath));
+        console.log(`[DATABASE] Connected to SQLite at ${dbPath}`);
+      } catch (sqliteErr) {
+        console.warn("[DATABASE] SQLite failed, falling back to MockDatabase", sqliteErr);
+        db = new MockAdapter(new MockDatabase());
+      }
     }
-    const Database = (await import("better-sqlite3")).default;
-    const dbPath = path.join(process.cwd(), "claims.db");
-    db = new Database(dbPath);
-    console.log(`[DATABASE] Connected to SQLite at ${dbPath}`);
   } catch (err) {
-    console.error("[DATABASE] Failed to connect to SQLite. Using in-memory mock database fallback.", err);
-    const { MockDatabase } = await import("./mock-db.ts");
-    db = new MockDatabase();
+    console.error("[DATABASE] Critical failure during DB init, using MockDatabase", err);
+    db = new MockAdapter(new MockDatabase());
   }
 
   // Initialize DB Tables
-  db.exec(`
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       email TEXT UNIQUE,
       password TEXT,
       full_name TEXT,
       address TEXT,
       phone TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
 
-  db.exec(`
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS average_prices (
       code TEXT PRIMARY KEY,
       description TEXT,
-      avg_price REAL
+      avg_price DECIMAL
     )
   `);
 
-  db.exec(`
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS audits (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       user_id INTEGER,
       filename TEXT,
-      total_savings REAL,
+      total_savings DECIMAL,
       items_flagged INTEGER,
       total_items INTEGER,
       results_json TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY(user_id) REFERENCES users(id)
     )
   `);
 
   // Migration: Add user_id to audits if it doesn't exist (for existing DBs)
   try {
-    db.prepare("SELECT user_id FROM audits LIMIT 1").get();
+    await db.get("SELECT user_id FROM audits LIMIT 1");
   } catch (e) {
-    db.exec("ALTER TABLE audits ADD COLUMN user_id INTEGER REFERENCES users(id)");
+    try {
+      await db.exec("ALTER TABLE audits ADD COLUMN user_id INTEGER REFERENCES users(id)");
+    } catch (alterErr) {
+      // Ignore if column already exists or other issues
+    }
   }
 
   // Seed some sample data if empty
-  const count = db.prepare("SELECT count(*) as count FROM average_prices").get() as { count: number };
-  if (count.count === 0) {
-    const insert = db.prepare("INSERT INTO average_prices (code, description, avg_price) VALUES (?, ?, ?)");
+  const countResult = await db.get<{ count: string | number }>("SELECT count(*) as count FROM average_prices");
+  const count = Number(countResult?.count || 0);
+  
+  if (count === 0) {
     const seedData = [
       ["99213", "Office Visit (Level 3)", 120.00],
       ["99214", "Office Visit (Level 4)", 180.00],
@@ -88,7 +104,7 @@ async function startServer() {
       ["J0696", "Ceftriaxone Injection", 25.00],
     ];
     for (const row of seedData) {
-      insert.run(row[0], row[1], row[2]);
+      await db.run("INSERT INTO average_prices (code, description, avg_price) VALUES (?, ?, ?)", row);
     }
   }
 
@@ -119,15 +135,21 @@ async function startServer() {
     try {
       const { email, password, full_name } = req.body;
       const hashedPassword = await bcrypt.hash(password, 10);
-      const insert = db.prepare("INSERT INTO users (email, password, full_name) VALUES (?, ?, ?)");
-      const info = insert.run(email, hashedPassword, full_name);
       
-      const token = jwt.sign({ id: info.lastInsertRowid, email }, JWT_SECRET);
+      // Use RETURNING id for Postgres compatibility
+      const query = process.env.POSTGRES_URL 
+        ? "INSERT INTO users (email, password, full_name) VALUES (?, ?, ?) RETURNING id"
+        : "INSERT INTO users (email, password, full_name) VALUES (?, ?, ?)";
+        
+      const info = await db.run(query, [email, hashedPassword, full_name]);
+      const userId = info.lastInsertRowid;
+      
+      const token = jwt.sign({ id: userId, email }, JWT_SECRET);
       res.cookie("token", token, { httpOnly: true, secure: true, sameSite: 'none' });
-      res.json({ id: info.lastInsertRowid, email, full_name });
+      res.json({ id: userId, email, full_name });
     } catch (err: any) {
       console.error("[SIGNUP ERROR]", err);
-      if (err?.message?.includes("UNIQUE constraint failed")) {
+      if (err?.message?.includes("UNIQUE constraint failed") || err?.message?.includes("duplicate key")) {
         return res.status(400).json({ error: "Email already exists" });
       }
       res.status(500).json({ error: "Signup failed" });
@@ -137,7 +159,7 @@ async function startServer() {
   app.post("/api/auth/login", async (req, res) => {
     try {
       const { email, password } = req.body;
-      const user = db.prepare("SELECT * FROM users WHERE email = ?").get(email) as any;
+      const user = await db.get<any>("SELECT * FROM users WHERE email = ?", [email]);
       if (!user) {
         return res.status(404).json({ error: "User not found" });
       }
@@ -159,16 +181,19 @@ async function startServer() {
     res.json({ success: true });
   });
 
-  app.get("/api/auth/me", authenticate, (req: any, res) => {
-    const user = db.prepare("SELECT id, email, full_name, address, phone FROM users WHERE id = ?").get(req.user.id) as any;
-    res.json(user);
+  app.get("/api/auth/me", authenticate, async (req: any, res) => {
+    try {
+      const user = await db.get<any>("SELECT id, email, full_name, address, phone FROM users WHERE id = ?", [req.user.id]);
+      res.json(user);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to fetch user" });
+    }
   });
 
-  app.put("/api/auth/profile", authenticate, (req: any, res) => {
+  app.put("/api/auth/profile", authenticate, async (req: any, res) => {
     try {
       const { full_name, address, phone } = req.body;
-      db.prepare("UPDATE users SET full_name = ?, address = ?, phone = ? WHERE id = ?")
-        .run(full_name, address, phone, req.user.id);
+      await db.run("UPDATE users SET full_name = ?, address = ?, phone = ? WHERE id = ?", [full_name, address, phone, req.user.id]);
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: "Update failed" });
@@ -177,37 +202,45 @@ async function startServer() {
 
   // API Routes
   app.get("/api/health", (req, res) => {
-    res.json({ status: "ok", env: process.env.NODE_ENV, database: "sqlite" });
+    res.json({ 
+      status: "ok", 
+      env: process.env.NODE_ENV, 
+      database: process.env.POSTGRES_URL ? "postgres" : (db instanceof SQLiteAdapter ? "sqlite" : "mock")
+    });
   });
 
-  app.get("/api/prices", (req, res) => {
+  app.get("/api/prices", async (req, res) => {
     try {
-      const prices = db.prepare("SELECT * FROM average_prices").all();
+      const prices = await db.all("SELECT * FROM average_prices");
       res.json(prices);
     } catch (err) {
       res.status(500).json({ error: "Database error" });
     }
   });
 
-  app.get("/api/audits", authenticate, (req: any, res) => {
+  app.get("/api/audits", authenticate, async (req: any, res) => {
     try {
-      const audits = db.prepare("SELECT * FROM audits WHERE user_id = ? ORDER BY created_at DESC").all(req.user.id);
+      const audits = await db.all("SELECT * FROM audits WHERE user_id = ? ORDER BY created_at DESC", [req.user.id]);
       res.json(audits);
     } catch (err) {
       res.status(500).json({ error: "Database error" });
     }
   });
 
-  app.post("/api/audits", authenticate, (req: any, res) => {
+  app.post("/api/audits", authenticate, async (req: any, res) => {
     try {
       const { filename, total_savings, items_flagged, total_items, results } = req.body;
-      const insert = db.prepare(`
-        INSERT INTO audits (user_id, filename, total_savings, items_flagged, total_items, results_json)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `);
-      const info = insert.run(req.user.id, filename, total_savings, items_flagged, total_items, JSON.stringify(results));
+      
+      const query = process.env.POSTGRES_URL
+        ? `INSERT INTO audits (user_id, filename, total_savings, items_flagged, total_items, results_json)
+           VALUES (?, ?, ?, ?, ?, ?) RETURNING id`
+        : `INSERT INTO audits (user_id, filename, total_savings, items_flagged, total_items, results_json)
+           VALUES (?, ?, ?, ?, ?, ?)`;
+           
+      const info = await db.run(query, [req.user.id, filename, total_savings, items_flagged, total_items, JSON.stringify(results)]);
       res.json({ id: info.lastInsertRowid });
     } catch (err) {
+      console.error("[AUDIT SAVE ERROR]", err);
       res.status(500).json({ error: "Database error" });
     }
   });
@@ -269,10 +302,14 @@ const appPromise = startServer().catch(err => {
 
 // For Vercel compatibility
 export default async (req: any, res: any) => {
-  const app = await appPromise;
-  if (!app) {
-    res.status(500).send("Server failed to initialize");
-    return;
+  try {
+    const app = await appPromise;
+    if (!app) {
+      res.status(500).json({ error: "Server failed to initialize" });
+      return;
+    }
+    return app(req, res);
+  } catch (err: any) {
+    res.status(500).json({ error: "Server error", message: err.message });
   }
-  return app(req, res);
 };
