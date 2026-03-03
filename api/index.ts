@@ -4,6 +4,27 @@ import path from "path";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import cookieParser from "cookie-parser";
+import { GoogleGenAI, Type } from "@google/genai";
+
+const SYSTEM_INSTRUCTION = `Role: You are an expert Medical Billing and Claims Auditor.
+
+Task: Your objective is to analyze medical claim descriptions and identify potential billing errors, missing information, or compliance risks.
+
+Context: You are the backend AI assistant for ClaimGuardian, a medical audits management platform. Users will submit text snippets of claim notes or billing codes. 
+
+Constraints: 
+* Only provide analysis based on standard medical billing practices.
+* Do not provide medical advice or diagnose conditions.
+* If the input is unrelated to medical claims, respond with: {"error": "Invalid input. Please provide medical claim data."}
+* Do not include Markdown formatting blocks (like \`\`\`json) in your final output.
+
+Output Format: Return your response strictly as a JSON object with the following keys:
+* "status": (String) "approved", "flagged", or "rejected"
+* "confidence_score": (Number) 1-100
+* "flags": (Array of Strings) List of identified issues, if any.
+* "recommendation": (String) A brief next-step action.`;
+
+// ... existing imports ...
 import { fileURLToPath } from "url";
 import "dotenv/config";
 import { MockDatabase } from "./mock-db.js";
@@ -233,6 +254,154 @@ app.put("/api/auth/profile", authenticate, async (req: any, res) => {
   }
 });
 
+app.post("/api/analyze-claim", authenticate, async (req: any, res) => {
+  try {
+    const { claimText } = req.body;
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "Gemini API key not configured" });
+
+    const ai = new GoogleGenAI({ apiKey });
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: claimText,
+      config: {
+        systemInstruction: SYSTEM_INSTRUCTION,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            status: { type: Type.STRING },
+            confidence_score: { type: Type.NUMBER },
+            flags: { 
+              type: Type.ARRAY,
+              items: { type: Type.STRING }
+            },
+            recommendation: { type: Type.STRING },
+            error: { type: Type.STRING }
+          },
+          required: ["status", "confidence_score", "flags", "recommendation"]
+        }
+      },
+    });
+
+    res.json(JSON.parse(response.text || "{}"));
+  } catch (err) {
+    console.error("[ANALYZE CLAIM ERROR]", err);
+    res.status(500).json({ error: "Analysis failed" });
+  }
+});
+
+app.post("/api/audit-bill", authenticate, async (req: any, res) => {
+  try {
+    const { imageData, mimeType } = req.body;
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "Gemini API key not configured" });
+
+    const ai = new GoogleGenAI({ apiKey });
+    const response = await ai.models.generateContent({
+      model: "gemini-3.1-pro-preview",
+      contents: {
+        parts: [
+          {
+            text: `Analyze this medical bill image. 
+            1. Extract the hospital/provider details (name, address) and patient details (name, account number, date of service).
+            2. Extract all line items/procedures.
+            3. For each procedure:
+               - Identify the CPT/HCPCS code (infer from description if missing).
+               - Extract the billed price.
+               - Estimate the Fair Market Value (FMV) based on typical Medicare or commercial insurance rates for this code.
+               - Determine if the item is "overcharged" (billed price significantly > FMV).
+               - Provide a short "analysis" explaining the finding (e.g., "Price is 3x Medicare rate" or "Possible unbundling").
+            
+            Return a JSON object matching the schema.`
+          },
+          {
+            inlineData: {
+              mimeType: mimeType,
+              data: imageData
+            }
+          }
+        ]
+      },
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            hospitalName: { type: Type.STRING },
+            hospitalAddress: { type: Type.STRING },
+            accountNumber: { type: Type.STRING },
+            dateOfService: { type: Type.STRING },
+            patientName: { type: Type.STRING },
+            procedures: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  code: { type: Type.STRING },
+                  description: { type: Type.STRING },
+                  price: { type: Type.NUMBER },
+                  fairPrice: { type: Type.NUMBER },
+                  isOvercharged: { type: Type.BOOLEAN },
+                  analysis: { type: Type.STRING }
+                },
+                required: ["code", "description", "price", "fairPrice", "isOvercharged", "analysis"]
+              }
+            }
+          },
+          required: ["procedures"]
+        }
+      }
+    });
+
+    res.json(JSON.parse(response.text || "{}"));
+  } catch (err) {
+    console.error("[AUDIT BILL ERROR]", err);
+    res.status(500).json({ error: "Audit failed" });
+  }
+});
+
+app.post("/api/generate-letter", authenticate, async (req: any, res) => {
+  try {
+    const { results, billDetails, userInfo } = req.body;
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "Gemini API key not configured" });
+
+    const ai = new GoogleGenAI({ apiKey });
+    const flaggedItems = results.filter((r: any) => r.isOvercharged);
+    const currentDate = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+
+    const prompt = `Write a professional medical bill dispute letter based on the following information:
+    
+    Current Date: ${currentDate}
+    
+    User Information:
+    ${userInfo}
+    
+    Hospital/Provider Details:
+    Name: ${billDetails.hospitalName}
+    Address: ${billDetails.hospitalAddress}
+    Account Number: ${billDetails.accountNumber}
+    Date of Service: ${billDetails.dateOfService}
+    
+    Flagged Overcharges:
+    ${flaggedItems.map((item: any) => `- ${item.description} (${item.code}): Billed $${item.price}, Fair Market Value $${item.avgPrice}. Analysis: ${item.analysis}`).join('\n')}
+    
+    The letter should be firm but professional, citing the fair market value findings and requesting a review and adjustment of the bill. 
+    Return ONLY the text of the letter.`;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: prompt,
+    });
+
+    res.json({ letter: response.text });
+  } catch (err) {
+    console.error("[GENERATE LETTER ERROR]", err);
+    res.status(500).json({ error: "Letter generation failed" });
+  }
+});
+
 // API Routes
 app.get("/api/health", (req, res) => {
   res.json({ 
@@ -301,6 +470,7 @@ async function setupFrontend() {
         middlewareMode: true,
         hmr: process.env.DISABLE_HMR === 'true' ? false : { overlay: false },
         watch: process.env.DISABLE_HMR === 'true' ? null : {},
+        ws: false, // Explicitly disable websocket to prevent connection errors in AI Studio
       },
       appType: "spa",
     });

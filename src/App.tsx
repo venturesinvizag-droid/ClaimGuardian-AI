@@ -4,9 +4,7 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
-import { GoogleGenAI, Type } from "@google/genai";
 import Markdown from 'react-markdown';
-import { analyzeClaim, AuditResult } from './services/geminiService';
 import { 
   Shield, 
   Upload, 
@@ -53,6 +51,14 @@ interface Procedure {
   avgPrice?: number;
   isOvercharged?: boolean;
   analysis?: string;
+}
+
+interface AuditResult {
+  status: "approved" | "flagged" | "rejected";
+  confidence_score: number;
+  flags: string[];
+  recommendation: string;
+  error?: string;
 }
 
 interface BillDetails {
@@ -390,7 +396,19 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
     setManualAuditResult(null);
     
     try {
-      const result = await analyzeClaim(claimText);
+      const response = await fetch('/api/analyze-claim', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ claimText })
+      });
+
+      if (!response.ok) {
+        const errData = await response.json();
+        throw new Error(errData.error || "Analysis failed");
+      }
+
+      const result = await response.json();
+      
       if (result.error) {
         setError(result.error);
       } else {
@@ -420,7 +438,7 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
       }
     } catch (err: any) {
       console.error(err);
-      setError("Failed to analyze the claim. Please try again.");
+      setError(err.message || "Failed to analyze the claim. Please try again.");
     } finally {
       setLoading(false);
     }
@@ -432,73 +450,26 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
     setLoading(true);
     setError(null);
     try {
-      const apiKey = process.env.GEMINI_API_KEY;
-      if (!apiKey) {
-        throw new Error("Gemini API key is not configured.");
-      }
-      const ai = new GoogleGenAI({ apiKey });
       const base64Data = preview.split(',')[1];
       
-      const response = await ai.models.generateContent({
-        model: "gemini-3.1-pro-preview",
-        contents: {
-          parts: [
-            {
-              text: `Analyze this medical bill image. 
-              1. Extract the hospital/provider details (name, address) and patient details (name, account number, date of service).
-              2. Extract all line items/procedures.
-              3. For each procedure:
-                 - Identify the CPT/HCPCS code (infer from description if missing).
-                 - Extract the billed price.
-                 - Estimate the Fair Market Value (FMV) based on typical Medicare or commercial insurance rates for this code.
-                 - Determine if the item is "overcharged" (billed price significantly > FMV).
-                 - Provide a short "analysis" explaining the finding (e.g., "Price is 3x Medicare rate" or "Possible unbundling").
-              
-              Return a JSON object matching the schema.`
-            },
-            {
-              inlineData: {
-                mimeType: file.type,
-                data: base64Data
-              }
-            }
-          ]
-        },
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              hospitalName: { type: Type.STRING },
-              hospitalAddress: { type: Type.STRING },
-              accountNumber: { type: Type.STRING },
-              dateOfService: { type: Type.STRING },
-              patientName: { type: Type.STRING },
-              procedures: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    code: { type: Type.STRING },
-                    description: { type: Type.STRING },
-                    price: { type: Type.NUMBER },
-                    fairPrice: { type: Type.NUMBER, description: "Estimated fair market value" },
-                    isOvercharged: { type: Type.BOOLEAN },
-                    analysis: { type: Type.STRING, description: "Reasoning for the flag" }
-                  },
-                  required: ["code", "description", "price", "fairPrice", "isOvercharged", "analysis"]
-                }
-              }
-            },
-            required: ["procedures"]
-          }
-        }
+      const response = await fetch('/api/audit-bill', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          imageData: base64Data,
+          mimeType: file.type
+        })
       });
 
-      const extractedData = JSON.parse(response.text || "{}");
+      if (!response.ok) {
+        const errData = await response.json();
+        throw new Error(errData.error || "Audit failed");
+      }
+
+      const extractedData = await response.json();
       const procedures: any[] = extractedData.procedures || [];
       const details: BillDetails = {
-        hospitalName: extractedData.hospitalName || '',
+        hospitalName: extractedData.hospitalName || 'Unknown Hospital',
         hospitalAddress: extractedData.hospitalAddress || '',
         accountNumber: extractedData.accountNumber || '',
         dateOfService: extractedData.dateOfService || '',
@@ -515,28 +486,19 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
         analysis: proc.analysis
       }));
 
-      // If we want to persist the 'analysis', we need to update the Procedure type definition.
-      // I will do that in a separate edit or include it here if I can edit the whole file or the interface definition.
-      // Since I am editing the function, I can't easily change the interface definition at the top of the file in the same Edit call 
-      // unless I use multi_edit or replace a large chunk.
-      // I'll stick to mapping to existing fields for now, and maybe put 'analysis' in description or handle it later.
-      // Wait, I can cast it or just add the property if I update the type later.
-      // Let's assume I will update the type.
-
       setResults(enrichedData);
       setBillDetails(details);
-
-      // Save to history
-      const savings = enrichedData.reduce((acc, curr) => {
-        if (curr.isOvercharged && curr.avgPrice) {
-          return acc + (curr.price - curr.avgPrice);
-        }
-        return acc;
-      }, 0);
 
       // Save to history if user is logged in
       if (user) {
         try {
+          const savings = enrichedData.reduce((acc, curr) => {
+            if (curr.isOvercharged && curr.avgPrice) {
+              return acc + (curr.price - curr.avgPrice);
+            }
+            return acc;
+          }, 0);
+
           const res = await fetch('/api/audits', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -563,7 +525,7 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
       }
     } catch (err: any) {
       console.error(err);
-      setError("Failed to analyze the bill. Please ensure the image is clear and try again.");
+      setError(err.message || "Failed to analyze the bill. Please ensure the image is clear and try again.");
     } finally {
       setLoading(false);
     }
@@ -611,11 +573,6 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
     
     setIsGeneratingLetter(true);
     try {
-      const apiKey = process.env.GEMINI_API_KEY;
-      if (!apiKey) {
-        throw new Error("Gemini API key is not configured. Please set GEMINI_API_KEY in your environment.");
-      }
-      const ai = new GoogleGenAI({ apiKey });
       const flaggedItems = results.filter(r => r.isOvercharged);
       const currentDate = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
       
@@ -626,47 +583,26 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
       [Sender Email]: ${user.email}
       ` : '';
 
-      const hospitalInfo = billDetails ? `
-      [Hospital Name]: ${billDetails.hospitalName || '[Hospital Name]'}
-      [Hospital Address]: ${billDetails.hospitalAddress || '[Hospital Address]'}
-      [Account Number]: ${billDetails.accountNumber || '[Account Number]'}
-      [Patient Name]: ${billDetails.patientName || '[Patient Name]'}
-      [Date of Service]: ${billDetails.dateOfService || '[Date]'}
-      ` : '';
-
-      const prompt = `Write a professional, well-structured medical billing dispute email. Use a persuasive yet respectful tone. Organize the content into clear paragraphs:
-
-      Opening: State the purpose of the email and reference the account/patient details.
-      The Issue: Explain the discrepancy found between the billed charges and the Fair Market Value (regional averages).
-      The Request: Ask for a review of the itemized statement and an adjustment of the charges to align with regional averages.
-      Closing: Provide a call to action and a timeline for a response (e.g., 30 days).
-
-      Use these details:
-      Patient: ${billDetails?.patientName || '[Patient Name]'}
-      Account #: ${billDetails?.accountNumber || '[Account Number]'}
-      Dates of Service: ${billDetails?.dateOfService || '[Date of Service]'}
-      Hospital: ${billDetails?.hospitalName || '[Hospital Name]'}
-      Hospital Address: ${billDetails?.hospitalAddress || '[Hospital Address]'}
-      
-      Sender Details:
-      ${userInfo}
-
-      Overcharged Items to mention in "The Issue":
-      ${flaggedItems.map(item => `- ${item.description} (Code: ${item.code}): Billed $${item.price.toFixed(2)}, Regional Average $${item.avgPrice?.toFixed(2)}`).join('\n')}
-      
-      Current Date: ${currentDate}
-
-      Format the response in clean Markdown as a ready-to-send email. Do not include placeholders if the information is provided above.`;
-
-      const response = await ai.models.generateContent({
-        model: "gemini-3.1-pro-preview",
-        contents: { parts: [{ text: prompt }] }
+      const response = await fetch('/api/generate-letter', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          results,
+          billDetails,
+          userInfo
+        })
       });
 
-      setDisputeLetter(response.text || "Failed to generate letter.");
-    } catch (err) {
+      if (!response.ok) {
+        const errData = await response.json();
+        throw new Error(errData.error || "Letter generation failed");
+      }
+
+      const data = await response.json();
+      setDisputeLetter(data.letter || "Failed to generate letter.");
+    } catch (err: any) {
       console.error(err);
-      setError("Failed to generate the dispute letter. Please try again.");
+      setError(err.message || "Failed to generate the dispute letter. Please try again.");
     } finally {
       setIsGeneratingLetter(false);
     }
