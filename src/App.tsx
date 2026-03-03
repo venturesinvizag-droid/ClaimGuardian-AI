@@ -631,6 +631,33 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
     e.preventDefault();
     setError(null);
     setMessage(null);
+
+    // Client-side validation
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(authForm.email)) {
+      setError("Please enter a valid email address.");
+      return;
+    }
+
+    if (authMode === 'signup') {
+      if (authForm.full_name.trim().length < 2) {
+        setError("Please enter your full name.");
+        return;
+      }
+      
+      // Password strength validation: min 8 chars, at least one letter and one number
+      const passwordRegex = /^(?=.*[A-Za-z])(?=.*\d)[A-Za-z\d!@#$%^&*()_+]{8,}$/;
+      if (!passwordRegex.test(authForm.password)) {
+        setError("Password must be at least 8 characters long and contain both letters and numbers.");
+        return;
+      }
+    } else {
+      if (!authForm.password) {
+        setError("Please enter your password.");
+        return;
+      }
+    }
+
     const endpoint = authMode === 'login' ? '/api/auth/login' : '/api/auth/signup';
     try {
       const res = await fetch(endpoint, {

@@ -185,9 +185,30 @@ const authenticate = (req: any, res: any, next: any) => {
 };
 
 // Auth Routes
+const validateEmail = (email: string) => {
+  return String(email)
+    .toLowerCase()
+    .match(
+      /^(([^<>()[\]\\.,;:\s@"]+(\.[^<>()[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/
+    );
+};
+
 app.post("/api/auth/signup", async (req, res) => {
   try {
     const { email, password, full_name } = req.body;
+
+    if (!email || !validateEmail(email)) {
+      return res.status(400).json({ error: "Invalid email address" });
+    }
+
+    if (!password || password.length < 8) {
+      return res.status(400).json({ error: "Password must be at least 8 characters long" });
+    }
+
+    if (!full_name || full_name.trim().length < 2) {
+      return res.status(400).json({ error: "Full name is required" });
+    }
+
     const hashedPassword = await bcrypt.hash(password, 10);
     
     const query = process.env.POSTGRES_URL 
@@ -212,6 +233,15 @@ app.post("/api/auth/signup", async (req, res) => {
 app.post("/api/auth/login", async (req, res) => {
   try {
     const { email, password } = req.body;
+
+    if (!email || !validateEmail(email)) {
+      return res.status(400).json({ error: "Invalid email address" });
+    }
+
+    if (!password) {
+      return res.status(400).json({ error: "Password is required" });
+    }
+
     const user = await db.get<any>("SELECT * FROM users WHERE email = ?", [email]);
     if (!user) {
       return res.status(404).json({ error: "User not found" });
