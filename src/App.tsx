@@ -120,6 +120,7 @@ export default function App() {
   const [billDetails, setBillDetails] = useState<BillDetails | null>(null);
   const [avgPrices, setAvgPrices] = useState<Record<string, AvgPriceData>>({});
   const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
   const [showShareModal, setShowShareModal] = useState(false);
   const [disputeLetter, setDisputeLetter] = useState<string | null>(null);
   const [isGeneratingLetter, setIsGeneratingLetter] = useState(false);
@@ -619,6 +620,7 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    setMessage(null);
     const endpoint = authMode === 'login' ? '/api/auth/login' : '/api/auth/signup';
     try {
       const res = await fetch(endpoint, {
@@ -639,7 +641,8 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
       if (!res.ok) {
         if (authMode === 'login' && data.error === "User not found") {
           setAuthMode('signup');
-          setError("Account not found. Please sign up.");
+          setError(null); 
+          setMessage("Welcome! It looks like you're new here. Please complete your registration.");
           return;
         }
         if (authMode === 'signup' && data.error === "Email already exists") {
@@ -856,6 +859,13 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
                     </div>
                   )}
 
+                  {message && (
+                    <div className="p-4 bg-emerald-500/10 border border-emerald-500/20 rounded-xl text-emerald-500 text-sm flex items-center gap-2">
+                      <CheckCircle2 className="w-4 h-4" />
+                      {message}
+                    </div>
+                  )}
+
                   <button
                     type="submit"
                     className="w-full py-4 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 shadow-lg shadow-indigo-600/20 transition-all"
@@ -866,7 +876,11 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
 
                 <div className="mt-6 text-center">
                   <button
-                    onClick={() => setAuthMode(authMode === 'login' ? 'signup' : 'login')}
+                    onClick={() => {
+                      setAuthMode(authMode === 'login' ? 'signup' : 'login');
+                      setError(null);
+                      setMessage(null);
+                    }}
                     className="text-sm font-medium text-indigo-500 hover:text-indigo-600"
                   >
                     {authMode === 'login' ? "Don't have an account? Sign up" : "Already have an account? Sign in"}

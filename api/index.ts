@@ -6,7 +6,7 @@ import jwt from "jsonwebtoken";
 import cookieParser from "cookie-parser";
 import { fileURLToPath } from "url";
 import "dotenv/config";
-import { MockDatabase } from "./mock-db.ts";
+import { MockDatabase } from "./mock-db.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -209,6 +209,16 @@ async function startServer() {
     } catch (err) {
       res.status(500).json({ error: "Database error" });
     }
+  });
+
+  // Global Error Handler
+  app.use((err: any, req: any, res: any, next: any) => {
+    console.error("[SERVER ERROR]", err);
+    res.status(500).json({ 
+      error: "Internal Server Error", 
+      message: err.message,
+      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+    });
   });
 
   // Catch-all for unmatched API routes to prevent HTML responses
