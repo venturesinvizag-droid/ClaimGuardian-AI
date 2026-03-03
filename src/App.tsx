@@ -49,6 +49,7 @@ interface Procedure {
   price: number;
   avgPrice?: number;
   isOvercharged?: boolean;
+  analysis?: string;
 }
 
 interface BillDetails {
@@ -379,9 +380,10 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
     setLoading(true);
     setError(null);
     try {
-      const apiKey = process.env.GEMINI_API_KEY;
+      // Use environment variable or fallback to the key provided by the user
+      const apiKey = process.env.GEMINI_API_KEY || "AIzaSyCpyBToJjQWheFtn0-1hk4zC5alE-Vzm7A";
       if (!apiKey) {
-        throw new Error("Gemini API key is not configured. Please set GEMINI_API_KEY in your environment.");
+        throw new Error("Gemini API key is not configured.");
       }
       const ai = new GoogleGenAI({ apiKey });
       const base64Data = preview.split(',')[1];
@@ -391,7 +393,17 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
         contents: {
           parts: [
             {
-              text: "Extract medical procedure codes (CPT/HCPCS) and their associated prices from this medical bill. Also extract the hospital name, hospital address, account number, date of service, and patient name. Return a JSON object with 'hospitalName', 'hospitalAddress', 'accountNumber', 'dateOfService', 'patientName', and a 'procedures' array containing objects with 'code', 'description', and 'price' (as a number). If a code is not found, try to infer it from the description or leave it blank."
+              text: `Analyze this medical bill image. 
+              1. Extract the hospital/provider details (name, address) and patient details (name, account number, date of service).
+              2. Extract all line items/procedures.
+              3. For each procedure:
+                 - Identify the CPT/HCPCS code (infer from description if missing).
+                 - Extract the billed price.
+                 - Estimate the Fair Market Value (FMV) based on typical Medicare or commercial insurance rates for this code.
+                 - Determine if the item is "overcharged" (billed price significantly > FMV).
+                 - Provide a short "analysis" explaining the finding (e.g., "Price is 3x Medicare rate" or "Possible unbundling").
+              
+              Return a JSON object matching the schema.`
             },
             {
               inlineData: {
@@ -418,9 +430,12 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
                   properties: {
                     code: { type: Type.STRING },
                     description: { type: Type.STRING },
-                    price: { type: Type.NUMBER }
+                    price: { type: Type.NUMBER },
+                    fairPrice: { type: Type.NUMBER, description: "Estimated fair market value" },
+                    isOvercharged: { type: Type.BOOLEAN },
+                    analysis: { type: Type.STRING, description: "Reasoning for the flag" }
                   },
-                  required: ["code", "description", "price"]
+                  required: ["code", "description", "price", "fairPrice", "isOvercharged", "analysis"]
                 }
               }
             },
@@ -430,7 +445,7 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
       });
 
       const extractedData = JSON.parse(response.text || "{}");
-      const procedures: Procedure[] = extractedData.procedures || [];
+      const procedures: any[] = extractedData.procedures || [];
       const details: BillDetails = {
         hospitalName: extractedData.hospitalName || '',
         hospitalAddress: extractedData.hospitalAddress || '',
@@ -439,17 +454,23 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
         patientName: extractedData.patientName || ''
       };
       
-      // Enrich with average prices and identify overcharges
-      const enrichedData = procedures.map(proc => {
-        const avgData = avgPrices[proc.code];
-        const avgPrice = avgData ? avgData.avg_price : proc.price * 0.8; // Fallback if not in DB
-        const isOvercharged = proc.price > avgPrice * 1.2;
-        return {
-          ...proc,
-          avgPrice,
-          isOvercharged
-        };
-      });
+      // Map to our internal Procedure type
+      const enrichedData: Procedure[] = procedures.map(proc => ({
+        code: proc.code,
+        description: proc.description,
+        price: proc.price,
+        avgPrice: proc.fairPrice, // Use AI's fair price as avgPrice
+        isOvercharged: proc.isOvercharged,
+        analysis: proc.analysis
+      }));
+
+      // If we want to persist the 'analysis', we need to update the Procedure type definition.
+      // I will do that in a separate edit or include it here if I can edit the whole file or the interface definition.
+      // Since I am editing the function, I can't easily change the interface definition at the top of the file in the same Edit call 
+      // unless I use multi_edit or replace a large chunk.
+      // I'll stick to mapping to existing fields for now, and maybe put 'analysis' in description or handle it later.
+      // Wait, I can cast it or just add the property if I update the type later.
+      // Let's assume I will update the type.
 
       setResults(enrichedData);
       setBillDetails(details);
@@ -470,7 +491,7 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
           total_savings: savings,
           items_flagged: enrichedData.filter(r => r.isOvercharged).length,
           total_items: enrichedData.length,
-          results: { details, procedures: enrichedData }
+          results: { details, procedures: enrichedData } // Save enriched data which matches Procedure interface
         })
       });
 
@@ -616,6 +637,11 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
 
       const data = await res.json();
       if (!res.ok) {
+        if (authMode === 'login' && data.error === "User not found") {
+          setAuthMode('signup');
+          setError("Account not found. Please sign up.");
+          return;
+        }
         if (authMode === 'signup' && data.error === "Email already exists") {
           setAuthMode('login');
           setError("This email is already registered. Please sign in.");
@@ -1192,7 +1218,14 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
                                 <tr key={idx} className={`group transition-colors ${darkMode ? 'hover:bg-slate-800/30' : 'hover:bg-indigo-50/30'}`}>
                                   <td className="px-4 sm:px-6 py-4 sm:py-5">
                                     <p className="font-bold text-xs sm:text-sm tracking-tight">{proc.description}</p>
-                                    <p className="text-[9px] sm:text-[10px] font-mono text-slate-500 mt-1">CPT {proc.code}</p>
+                                    <div className="flex flex-col gap-1 mt-1">
+                                      <p className="text-[9px] sm:text-[10px] font-mono text-slate-500">CPT {proc.code}</p>
+                                      {proc.analysis && (
+                                        <p className={`text-[10px] sm:text-xs italic ${proc.isOvercharged ? 'text-amber-500' : 'text-emerald-500'}`}>
+                                          "{proc.analysis}"
+                                        </p>
+                                      )}
+                                    </div>
                                   </td>
                                   <td className="px-4 sm:px-6 py-4 sm:py-5 text-right">
                                     <p className={`font-mono font-bold text-xs sm:text-sm ${proc.isOvercharged ? 'text-amber-500' : ''}`}>

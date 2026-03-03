@@ -1,24 +1,28 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
-import Database from "better-sqlite3";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import cookieParser from "cookie-parser";
 import { fileURLToPath } from "url";
 import "dotenv/config";
+import { MockDatabase } from "./mock-db.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 let db: any;
 try {
+  if (process.env.VERCEL === '1') {
+    throw new Error("Running on Vercel, skipping better-sqlite3");
+  }
+  const Database = (await import("better-sqlite3")).default;
   const dbPath = path.join(process.cwd(), "claims.db");
   db = new Database(dbPath);
   console.log(`[DATABASE] Connected to SQLite at ${dbPath}`);
 } catch (err) {
-  console.error("[DATABASE] Failed to connect to SQLite. Using in-memory database fallback.", err);
-  db = new Database(":memory:");
+  console.error("[DATABASE] Failed to connect to SQLite. Using in-memory mock database fallback.", err);
+  db = new MockDatabase();
 }
 
 const JWT_SECRET = process.env.JWT_SECRET || "claim-guardian-secret-key-123";
@@ -133,8 +137,11 @@ async function startServer() {
     try {
       const { email, password } = req.body;
       const user = db.prepare("SELECT * FROM users WHERE email = ?").get(email) as any;
-      if (!user || !(await bcrypt.compare(password, user.password))) {
-        return res.status(401).json({ error: "Invalid credentials" });
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+      if (!(await bcrypt.compare(password, user.password))) {
+        return res.status(401).json({ error: "Invalid password" });
       }
       
       const token = jwt.sign({ id: user.id, email }, JWT_SECRET);
@@ -233,7 +240,7 @@ async function startServer() {
     });
   }
 
-  const port = Number(process.env.PORT) || 3000;
+  const port = 3000;
   // Only listen if we're not running as a Vercel function
   if (process.env.VERCEL !== '1') {
     app.listen(port, "0.0.0.0", () => {
