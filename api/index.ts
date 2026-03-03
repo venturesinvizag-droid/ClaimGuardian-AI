@@ -24,11 +24,15 @@ async function initializeDatabase() {
 
   dbInitializationPromise = (async () => {
     try {
-      if (process.env.POSTGRES_URL) {
+      // Check if Postgres URL is present and looks valid
+      const postgresUrl = process.env.POSTGRES_URL;
+      const isPostgresValid = postgresUrl && (postgresUrl.startsWith('postgres://') || postgresUrl.startsWith('postgresql://'));
+
+      if (isPostgresValid) {
         console.log("[DATABASE] Connecting to Vercel Postgres...");
         db = new PostgresAdapter();
       } else if (process.env.VERCEL === '1' || process.env.NODE_ENV === 'production') {
-        console.log("[DATABASE] Running in production/Vercel without Postgres, using MockDatabase");
+        console.log("[DATABASE] Running in production/Vercel without valid Postgres, using MockDatabase");
         db = new MockAdapter(new MockDatabase());
       } else {
         try {
@@ -54,7 +58,8 @@ async function initializeDatabase() {
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
       `);
-
+      
+      // ... rest of table initializations ...
       await db.exec(`
         CREATE TABLE IF NOT EXISTS average_prices (
           code TEXT PRIMARY KEY,
@@ -111,8 +116,8 @@ async function initializeDatabase() {
       dbInitialized = true;
     } catch (err) {
       console.error("[DATABASE] Critical failure during DB init", err);
-      // Fallback to mock if everything else fails
-      if (!db) db = new MockAdapter(new MockDatabase());
+      // FORCE fallback to mock if initialization fails (e.g. Invalid URL)
+      db = new MockAdapter(new MockDatabase());
       dbInitialized = true;
     }
   })();

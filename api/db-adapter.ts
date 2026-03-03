@@ -1,4 +1,4 @@
-import { sql } from "@vercel/postgres";
+import { db } from "@vercel/postgres";
 import path from "path";
 
 export interface DatabaseAdapter {
@@ -10,29 +10,24 @@ export interface DatabaseAdapter {
 
 export class PostgresAdapter implements DatabaseAdapter {
   async exec(query: string) {
-    // Postgres doesn't have a single 'exec' for multiple statements usually in this context,
-    // but we can just run the query.
-    await sql.query(query);
+    await db.query(query);
   }
 
   async get<T>(query: string, params: any[] = []): Promise<T | undefined> {
     const pgQuery = this.convertQuery(query);
-    const { rows } = await sql.query(pgQuery, params);
+    const { rows } = await db.query(pgQuery, params);
     return rows[0] as T;
   }
 
   async all<T>(query: string, params: any[] = []): Promise<T[]> {
     const pgQuery = this.convertQuery(query);
-    const { rows } = await sql.query(pgQuery, params);
+    const { rows } = await db.query(pgQuery, params);
     return rows as T[];
   }
 
   async run(query: string, params: any[] = []) {
     const pgQuery = this.convertQuery(query);
-    const result = await sql.query(pgQuery, params);
-    // Vercel Postgres / pg doesn't return lastInsertRowid directly in the same way as sqlite
-    // We usually need RETURNING id in the query.
-    // For simplicity in this adapter, we'll try to extract it if possible or just return changes.
+    const result = await db.query(pgQuery, params);
     return { 
       changes: result.rowCount || 0,
       lastInsertRowid: (result.rows[0] as any)?.id 
