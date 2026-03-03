@@ -6,7 +6,7 @@ import jwt from "jsonwebtoken";
 import cookieParser from "cookie-parser";
 import { fileURLToPath } from "url";
 import "dotenv/config";
-import { MockDatabase } from "./mock-db.ts";
+import { MockDatabase } from "./mock-db.js";
 import { DatabaseAdapter, PostgresAdapter, SQLiteAdapter, MockAdapter } from "./db-adapter.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -45,6 +45,8 @@ async function initializeDatabase() {
           db = new MockAdapter(new MockDatabase());
         }
       }
+
+      console.log(`[DATABASE] Using adapter: ${db.constructor.name}`);
 
       // Initialize DB Tables
       await db.exec(`
@@ -133,7 +135,12 @@ app.use(cookieParser());
 // Middleware to ensure DB is initialized
 app.use(async (req, res, next) => {
   if (req.path.startsWith('/api')) {
-    await initializeDatabase();
+    try {
+      await initializeDatabase();
+    } catch (err) {
+      console.error("[SERVER] Database initialization failed:", err);
+      return next(err);
+    }
   }
   next();
 });

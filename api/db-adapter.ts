@@ -30,7 +30,7 @@ export class PostgresAdapter implements DatabaseAdapter {
     const result = await db.query(pgQuery, params);
     return { 
       changes: result.rowCount || 0,
-      lastInsertRowid: (result.rows[0] as any)?.id 
+      lastInsertRowid: result.rows && result.rows.length > 0 ? (result.rows[0] as any).id : undefined
     };
   }
 
