@@ -6,6 +6,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { GoogleGenAI, Type } from "@google/genai";
 import Markdown from 'react-markdown';
+import { analyzeClaim, AuditResult } from './services/geminiService';
 import { 
   Shield, 
   Upload, 
@@ -37,7 +38,9 @@ import {
   BarChart3,
   BookOpen,
   PieChart,
-  Share2
+  Share2,
+  FileSearch,
+  Zap
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer } from 'recharts';
@@ -77,6 +80,7 @@ interface AvgPriceData {
 interface AuditRecord {
   id: number;
   filename: string;
+  hospital_name: string;
   total_savings: number;
   items_flagged: number;
   total_items: number;
@@ -125,6 +129,9 @@ export default function App() {
   const [disputeLetter, setDisputeLetter] = useState<string | null>(null);
   const [isGeneratingLetter, setIsGeneratingLetter] = useState(false);
   const [auditHistory, setAuditHistory] = useState<AuditRecord[]>([]);
+  const [auditMode, setAuditMode] = useState<'upload' | 'manual'>('upload');
+  const [claimText, setClaimText] = useState("");
+  const [manualAuditResult, setManualAuditResult] = useState<AuditResult | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const resultsRef = useRef<HTMLDivElement>(null);
 
@@ -375,14 +382,57 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
+  const handleManualAudit = async () => {
+    if (!claimText.trim()) return;
+    
+    setLoading(true);
+    setError(null);
+    setManualAuditResult(null);
+    
+    try {
+      const result = await analyzeClaim(claimText);
+      if (result.error) {
+        setError(result.error);
+      } else {
+        setManualAuditResult(result);
+        
+        // Save to history if user is logged in
+        if (user) {
+          try {
+            await fetch('/api/audits', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                filename: "manual_audit.txt",
+                hospital_name: "Manual Claim Audit",
+                total_billed: 0,
+                total_savings: 0,
+                items_flagged: result.status === 'approved' ? 0 : 1,
+                total_items: 1,
+                results: result
+              })
+            });
+            fetchHistory();
+          } catch (dbErr) {
+            console.error("Failed to save manual audit to history:", dbErr);
+          }
+        }
+      }
+    } catch (err: any) {
+      console.error(err);
+      setError("Failed to analyze the claim. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const auditBill = async () => {
     if (!file || !preview) return;
 
     setLoading(true);
     setError(null);
     try {
-      // Use environment variable or fallback to the key provided by the user
-      const apiKey = process.env.GEMINI_API_KEY || "AIzaSyCpyBToJjQWheFtn0-1hk4zC5alE-Vzm7A";
+      const apiKey = process.env.GEMINI_API_KEY;
       if (!apiKey) {
         throw new Error("Gemini API key is not configured.");
       }
@@ -484,25 +534,33 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
         return acc;
       }, 0);
 
-      const res = await fetch('/api/audits', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          filename: file.name,
-          total_savings: savings,
-          items_flagged: enrichedData.filter(r => r.isOvercharged).length,
-          total_items: enrichedData.length,
-          results: { details, procedures: enrichedData } // Save enriched data which matches Procedure interface
-        })
-      });
+      // Save to history if user is logged in
+      if (user) {
+        try {
+          const res = await fetch('/api/audits', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              filename: file.name,
+              hospital_name: details.hospitalName,
+              total_savings: savings,
+              items_flagged: enrichedData.filter(r => r.isOvercharged).length,
+              total_items: enrichedData.length,
+              results: { details, procedures: enrichedData }
+            })
+          });
 
-      if (res.status === 401) {
-        setUser(null);
-        setView('auth');
-        return;
+          if (res.status === 401) {
+            setUser(null);
+            setView('auth');
+            return;
+          }
+
+          fetchHistory();
+        } catch (dbErr) {
+          console.error("Failed to save audit to history:", dbErr);
+        }
       }
-
-      fetchHistory();
     } catch (err: any) {
       console.error(err);
       setError("Failed to analyze the bill. Please ensure the image is clear and try again.");
@@ -520,16 +578,32 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
 
   const loadAuditFromHistory = (record: AuditRecord) => {
     const parsed = JSON.parse(record.results_json);
-    if (Array.isArray(parsed)) {
+    
+    // Reset all results first
+    setResults([]);
+    setBillDetails(null);
+    setManualAuditResult(null);
+
+    if (record.hospital_name === "Manual Claim Audit") {
+      setManualAuditResult(parsed as AuditResult);
+      setAuditMode('manual');
+    } else if (Array.isArray(parsed)) {
       setResults(parsed);
-      setBillDetails(null);
+      setAuditMode('upload');
     } else {
       setResults(parsed.procedures || []);
       setBillDetails(parsed.details || null);
+      setAuditMode('upload');
     }
+    
     setFile(null);
     setPreview(null);
     setView('dashboard');
+    
+    // Scroll to results
+    setTimeout(() => {
+      resultsRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }, 100);
   };
 
   const generateLetter = async () => {
@@ -1045,95 +1119,161 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
 
               {/* Dashboard Content */}
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start max-w-2xl lg:max-w-none mx-auto">
-                {/* Left Column: Upload & Preview */}
+                {/* Left Column: Audit Input */}
                 <div className="lg:col-span-5 space-y-6 lg:sticky lg:top-24">
-                  <section className={`p-5 sm:p-8 rounded-3xl border transition-all ${darkMode ? 'bg-slate-900 border-slate-800 shadow-none' : 'bg-white border-slate-200 shadow-xl shadow-slate-200/50'}`}>
-                    <div className="flex items-center gap-3 mb-6">
-                      <div className="p-2 bg-indigo-600/10 text-indigo-600 rounded-xl">
-                        <Upload className="w-5 h-5" />
-                      </div>
-                      <h3 className="text-lg sm:text-xl font-display font-bold">Upload Bill</h3>
-                    </div>
-                    
-                    <div 
-                      onClick={() => fileInputRef.current?.click()}
-                      onDragOver={(e) => e.preventDefault()}
-                      onDrop={(e) => {
-                        e.preventDefault();
-                        const droppedFile = e.dataTransfer.files[0];
-                        if (droppedFile && droppedFile.type.startsWith('image/')) {
-                          setFile(droppedFile);
-                          const reader = new FileReader();
-                          reader.onload = () => setPreview(reader.result as string);
-                          reader.readAsDataURL(droppedFile);
-                        }
-                      }}
-                      className={`group relative border-2 border-dashed rounded-2xl p-6 sm:p-10 flex flex-col items-center justify-center cursor-pointer transition-all duration-300 ${
-                        file 
-                          ? (darkMode ? 'border-indigo-500 bg-indigo-500/5' : 'border-indigo-400 bg-indigo-50') 
-                          : (darkMode ? 'border-slate-800 hover:border-indigo-500/50 hover:bg-slate-800/50' : 'border-slate-200 hover:border-indigo-500/50 hover:bg-slate-50')
-                      }`}
+                  <div className={`p-1 rounded-2xl flex items-center mb-2 ${darkMode ? 'bg-slate-950' : 'bg-slate-100'}`}>
+                    <button 
+                      onClick={() => setAuditMode('upload')}
+                      className={`flex-1 py-2 rounded-xl text-xs font-bold transition-all ${auditMode === 'upload' ? (darkMode ? 'bg-slate-800 text-white shadow-lg' : 'bg-white text-indigo-600 shadow-sm') : 'text-slate-500'}`}
                     >
-                      <input 
-                        type="file" 
-                        ref={fileInputRef}
-                        onChange={handleFileChange}
-                        className="hidden" 
-                        accept="image/*"
-                      />
-                      
-                      {file ? (
-                        <div className="text-center space-y-2">
-                          <div className="w-12 h-12 sm:w-16 sm:h-16 bg-indigo-600 text-white rounded-2xl flex items-center justify-center mx-auto shadow-lg shadow-indigo-600/20">
-                            <FileText className="w-6 h-6 sm:w-8 sm:h-8" />
-                          </div>
-                          <div>
-                            <p className={`text-xs sm:text-sm font-bold truncate max-w-[150px] sm:max-w-[200px] ${darkMode ? 'text-slate-200' : 'text-slate-700'}`}>{file.name}</p>
-                            <p className="text-[10px] sm:text-xs text-slate-500">{(file.size / 1024).toFixed(1)} KB</p>
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="text-center space-y-4">
-                          <div className={`w-12 h-12 sm:w-16 sm:h-16 rounded-2xl flex items-center justify-center mx-auto transition-transform group-hover:scale-110 ${darkMode ? 'bg-slate-800 text-slate-600' : 'bg-slate-50 text-slate-400'}`}>
-                            <Upload className="w-6 h-6 sm:w-8 sm:h-8" />
-                          </div>
-                          <div className="space-y-1">
-                            <p className="text-xs sm:text-sm font-bold">Click to upload</p>
-                            <p className="text-[10px] sm:text-xs text-slate-500">or drag and drop bill image</p>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-
-                    <button
-                      disabled={!file || loading}
-                      onClick={auditBill}
-                      className={`w-full mt-6 sm:mt-8 group relative px-6 sm:px-8 py-3 sm:py-4 bg-indigo-600 text-white rounded-2xl font-bold text-base sm:text-lg shadow-xl shadow-indigo-600/20 hover:bg-indigo-700 hover:scale-[1.02] active:scale-[0.98] transition-all flex items-center justify-center gap-3 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100`}
-                    >
-                      {loading ? (
-                        <>
-                          <Loader2 className="w-4 h-4 sm:w-5 sm:h-5 animate-spin" />
-                          Analyzing...
-                        </>
-                      ) : (
-                        <>
-                          <Search className="w-4 h-4 sm:w-5 sm:h-5" />
-                          Start Audit
-                        </>
-                      )}
+                      Upload Bill
                     </button>
+                    <button 
+                      onClick={() => setAuditMode('manual')}
+                      className={`flex-1 py-2 rounded-xl text-xs font-bold transition-all ${auditMode === 'manual' ? (darkMode ? 'bg-slate-800 text-white shadow-lg' : 'bg-white text-indigo-600 shadow-sm') : 'text-slate-500'}`}
+                    >
+                      Manual Audit
+                    </button>
+                  </div>
 
-                    {error && (
-                      <motion.div 
-                        initial={{ opacity: 0, y: 10 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        className={`mt-4 p-4 rounded-xl border flex items-start gap-3 ${darkMode ? 'bg-red-900/10 border-red-900/30 text-red-400' : 'bg-red-50 border-red-100 text-red-600'}`}
+                  {auditMode === 'upload' ? (
+                    <section className={`p-5 sm:p-8 rounded-3xl border transition-all ${darkMode ? 'bg-slate-900 border-slate-800 shadow-none' : 'bg-white border-slate-200 shadow-xl shadow-slate-200/50'}`}>
+                      <div className="flex items-center gap-3 mb-6">
+                        <div className="p-2 bg-indigo-600/10 text-indigo-600 rounded-xl">
+                          <Upload className="w-5 h-5" />
+                        </div>
+                        <h3 className="text-lg sm:text-xl font-display font-bold">Upload Bill</h3>
+                      </div>
+                      
+                      <div 
+                        onClick={() => fileInputRef.current?.click()}
+                        onDragOver={(e) => e.preventDefault()}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          const droppedFile = e.dataTransfer.files[0];
+                          if (droppedFile && droppedFile.type.startsWith('image/')) {
+                            setFile(droppedFile);
+                            const reader = new FileReader();
+                            reader.onload = () => setPreview(reader.result as string);
+                            reader.readAsDataURL(droppedFile);
+                          }
+                        }}
+                        className={`group relative border-2 border-dashed rounded-2xl p-6 sm:p-10 flex flex-col items-center justify-center cursor-pointer transition-all duration-300 ${
+                          file 
+                            ? (darkMode ? 'border-indigo-500 bg-indigo-500/5' : 'border-indigo-400 bg-indigo-50') 
+                            : (darkMode ? 'border-slate-800 hover:border-indigo-500/50 hover:bg-slate-800/50' : 'border-slate-200 hover:border-indigo-500/50 hover:bg-slate-50')
+                        }`}
                       >
-                        <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
-                        <p className="text-sm font-medium">{error}</p>
-                      </motion.div>
-                    )}
-                  </section>
+                        <input 
+                          type="file" 
+                          ref={fileInputRef}
+                          onChange={handleFileChange}
+                          className="hidden" 
+                          accept="image/*"
+                        />
+                        
+                        {file ? (
+                          <div className="text-center space-y-2">
+                            <div className="w-12 h-12 sm:w-16 sm:h-16 bg-indigo-600 text-white rounded-2xl flex items-center justify-center mx-auto shadow-lg shadow-indigo-600/20">
+                              <FileText className="w-6 h-6 sm:w-8 sm:h-8" />
+                            </div>
+                            <div>
+                              <p className={`text-xs sm:text-sm font-bold truncate max-w-[150px] sm:max-w-[200px] ${darkMode ? 'text-slate-200' : 'text-slate-700'}`}>{file.name}</p>
+                              <p className="text-[10px] sm:text-xs text-slate-500">{(file.size / 1024).toFixed(1)} KB</p>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="text-center space-y-4">
+                            <div className={`w-12 h-12 sm:w-16 sm:h-16 rounded-2xl flex items-center justify-center mx-auto transition-transform group-hover:scale-110 ${darkMode ? 'bg-slate-800 text-slate-600' : 'bg-slate-50 text-slate-400'}`}>
+                              <Upload className="w-6 h-6 sm:w-8 sm:h-8" />
+                            </div>
+                            <div className="space-y-1">
+                              <p className="text-xs sm:text-sm font-bold">Click to upload</p>
+                              <p className="text-[10px] sm:text-xs text-slate-500">or drag and drop bill image</p>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      <button
+                        disabled={!file || loading}
+                        onClick={auditBill}
+                        className={`w-full mt-6 sm:mt-8 group relative px-6 sm:px-8 py-3 sm:py-4 bg-indigo-600 text-white rounded-2xl font-bold text-base sm:text-lg shadow-xl shadow-indigo-600/20 hover:bg-indigo-700 hover:scale-[1.02] active:scale-[0.98] transition-all flex items-center justify-center gap-3 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100`}
+                      >
+                        {loading ? (
+                          <>
+                            <Loader2 className="w-4 h-4 sm:w-5 sm:h-5 animate-spin" />
+                            Analyzing...
+                          </>
+                        ) : (
+                          <>
+                            <Search className="w-4 h-4 sm:w-5 sm:h-5" />
+                            Start Audit
+                          </>
+                        )}
+                      </button>
+
+                      {error && (
+                        <motion.div 
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          className={`mt-4 p-4 rounded-xl border flex items-start gap-3 ${darkMode ? 'bg-red-900/10 border-red-900/30 text-red-400' : 'bg-red-50 border-red-100 text-red-600'}`}
+                        >
+                          <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
+                          <p className="text-sm font-medium">{error}</p>
+                        </motion.div>
+                      )}
+                    </section>
+                  ) : (
+                    <section className={`p-5 sm:p-8 rounded-3xl border transition-all ${darkMode ? 'bg-slate-900 border-slate-800 shadow-none' : 'bg-white border-slate-200 shadow-xl shadow-slate-200/50'}`}>
+                      <div className="flex items-center gap-3 mb-6">
+                        <div className="p-2 bg-indigo-600/10 text-indigo-600 rounded-xl">
+                          <FileSearch className="w-5 h-5" />
+                        </div>
+                        <h3 className="text-lg sm:text-xl font-display font-bold">Manual Claim Audit</h3>
+                      </div>
+                      
+                      <div className="space-y-4">
+                        <label className="block text-xs font-bold uppercase tracking-widest text-slate-500">Claim Description / Notes</label>
+                        <textarea
+                          rows={6}
+                          value={claimText}
+                          onChange={(e) => setClaimText(e.target.value)}
+                          placeholder="Enter claim descriptions, billing codes, or provider notes here for AI auditing..."
+                          className={`w-full px-4 py-4 rounded-2xl border outline-none transition-all resize-none text-sm ${darkMode ? 'bg-slate-950 border-slate-800 focus:border-indigo-500' : 'bg-slate-50 border-slate-200 focus:border-indigo-500'}`}
+                        />
+                      </div>
+
+                      <button
+                        disabled={!claimText.trim() || loading}
+                        onClick={handleManualAudit}
+                        className={`w-full mt-6 sm:mt-8 group relative px-6 sm:px-8 py-3 sm:py-4 bg-indigo-600 text-white rounded-2xl font-bold text-base sm:text-lg shadow-xl shadow-indigo-600/20 hover:bg-indigo-700 hover:scale-[1.02] active:scale-[0.98] transition-all flex items-center justify-center gap-3 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100`}
+                      >
+                        {loading ? (
+                          <>
+                            <Loader2 className="w-4 h-4 sm:w-5 sm:h-5 animate-spin" />
+                            Auditing...
+                          </>
+                        ) : (
+                          <>
+                            <Zap className="w-4 h-4 sm:w-5 sm:h-5" />
+                            Run AI Audit
+                          </>
+                        )}
+                      </button>
+
+                      {error && (
+                        <motion.div 
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          className={`mt-4 p-4 rounded-xl border flex items-start gap-3 ${darkMode ? 'bg-red-900/10 border-red-900/30 text-red-400' : 'bg-red-50 border-red-100 text-red-600'}`}
+                        >
+                          <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
+                          <p className="text-sm font-medium">{error}</p>
+                        </motion.div>
+                      )}
+                    </section>
+                  )}
 
                   {/* Preview Section */}
                   <AnimatePresence>
@@ -1156,7 +1296,88 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
 
                 {/* Right Column: Results */}
                 <div className="lg:col-span-7 space-y-8">
-                  {results.length > 0 ? (
+                  {manualAuditResult ? (
+                    <motion.div
+                      initial={{ opacity: 0, y: 20 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="space-y-6"
+                    >
+                      <div className={`p-8 rounded-3xl border transition-all ${darkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200 shadow-xl shadow-slate-200/50'}`}>
+                        <div className="flex flex-col sm:flex-row items-center justify-between gap-6 mb-8">
+                          <div className="flex items-center gap-4">
+                            <div className={`p-4 rounded-2xl ${
+                              manualAuditResult.status === 'approved' ? 'bg-emerald-500/10 text-emerald-500' :
+                              manualAuditResult.status === 'flagged' ? 'bg-amber-500/10 text-amber-500' :
+                              'bg-red-500/10 text-red-500'
+                            }`}>
+                              {manualAuditResult.status === 'approved' ? <CheckCircle2 className="w-8 h-8" /> :
+                               manualAuditResult.status === 'flagged' ? <AlertCircle className="w-8 h-8" /> :
+                               <X className="w-8 h-8" />}
+                            </div>
+                            <div>
+                              <h3 className="text-2xl font-display font-bold capitalize">{manualAuditResult.status}</h3>
+                              <p className="text-sm text-slate-500 font-medium">Audit Status</p>
+                            </div>
+                          </div>
+                          
+                          <div className="text-center sm:text-right">
+                            <div className="text-3xl font-display font-extrabold text-indigo-600">{manualAuditResult.confidence_score}%</div>
+                            <p className="text-xs text-slate-500 font-bold uppercase tracking-widest">Confidence Score</p>
+                          </div>
+                        </div>
+
+                        <div className="space-y-6">
+                          <div>
+                            <h4 className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-3">Identified Issues</h4>
+                            <div className="flex flex-wrap gap-2">
+                              {manualAuditResult.flags.length > 0 ? (
+                                manualAuditResult.flags.map((flag, i) => (
+                                  <span key={i} className={`px-3 py-1.5 rounded-lg text-xs font-bold border ${
+                                    darkMode ? 'bg-slate-800 border-slate-700 text-slate-300' : 'bg-slate-50 border-slate-100 text-slate-600'
+                                  }`}>
+                                    {flag}
+                                  </span>
+                                ))
+                              ) : (
+                                <p className="text-sm text-slate-400 italic">No issues identified.</p>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className={`p-5 rounded-2xl border ${darkMode ? 'bg-slate-950 border-slate-800' : 'bg-indigo-50/50 border-indigo-100/50'}`}>
+                            <h4 className="text-xs font-bold uppercase tracking-widest text-indigo-500 mb-2">Recommendation</h4>
+                            <p className={`text-sm leading-relaxed ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
+                              {manualAuditResult.recommendation}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="mt-8 flex gap-3">
+                          <button 
+                            onClick={() => {
+                              setClaimText("");
+                              setManualAuditResult(null);
+                            }}
+                            className={`flex-1 py-3 rounded-xl font-bold text-sm border-2 transition-all ${darkMode ? 'border-slate-800 text-slate-400 hover:bg-slate-800' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}
+                          >
+                            New Audit
+                          </button>
+                          <button 
+                            onClick={() => {
+                              const text = `Audit Status: ${manualAuditResult.status}\nConfidence: ${manualAuditResult.confidence_score}%\nFlags: ${manualAuditResult.flags.join(', ')}\nRecommendation: ${manualAuditResult.recommendation}`;
+                              navigator.clipboard.writeText(text);
+                              setMessage("Audit results copied to clipboard!");
+                              setTimeout(() => setMessage(null), 3000);
+                            }}
+                            className="flex-1 py-3 bg-indigo-600 text-white rounded-xl font-bold text-sm hover:bg-indigo-700 shadow-lg shadow-indigo-600/20 transition-all flex items-center justify-center gap-2"
+                          >
+                            <Copy className="w-4 h-4" />
+                            Copy Results
+                          </button>
+                        </div>
+                      </div>
+                    </motion.div>
+                  ) : results.length > 0 ? (
                     <motion.div 
                       ref={resultsRef}
                       initial={{ opacity: 0 }}
@@ -1431,8 +1652,13 @@ If you receive a bill that you believe violates the No Surprises Act, you can fi
                             <FileText className="w-6 h-6 sm:w-8 sm:h-8 text-indigo-500" />
                           </div>
                           <div>
-                            <h4 className="font-display font-bold text-lg sm:text-2xl mb-1 truncate max-w-[180px] sm:max-w-none">{record.filename}</h4>
-                            <div className="flex items-center gap-3 sm:gap-4 text-[10px] sm:text-sm opacity-50 font-medium">
+                            <h4 className="font-display font-bold text-lg sm:text-2xl mb-1 truncate max-w-[180px] sm:max-w-none">
+                              {record.hospital_name || record.filename}
+                            </h4>
+                            <div className="flex flex-wrap items-center gap-3 sm:gap-4 text-[10px] sm:text-sm opacity-50 font-medium">
+                              {record.hospital_name && record.filename && record.filename !== "manual_audit.txt" && (
+                                <span className="flex items-center gap-1.5 italic opacity-70">{record.filename}</span>
+                              )}
                               <span className="flex items-center gap-1.5"><Calendar className="w-3 h-3 sm:w-4 sm:h-4" /> {new Date(record.created_at).toLocaleDateString()}</span>
                               <span className="flex items-center gap-1.5"><Clock className="w-3 h-3 sm:w-4 sm:h-4" /> {new Date(record.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                             </div>
