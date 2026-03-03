@@ -6,90 +6,91 @@ import jwt from "jsonwebtoken";
 import cookieParser from "cookie-parser";
 import { fileURLToPath } from "url";
 import "dotenv/config";
-import { MockDatabase } from "./mock-db.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 let db: any;
-try {
-  if (process.env.VERCEL === '1') {
-    throw new Error("Running on Vercel, skipping better-sqlite3");
-  }
-  const Database = (await import("better-sqlite3")).default;
-  const dbPath = path.join(process.cwd(), "claims.db");
-  db = new Database(dbPath);
-  console.log(`[DATABASE] Connected to SQLite at ${dbPath}`);
-} catch (err) {
-  console.error("[DATABASE] Failed to connect to SQLite. Using in-memory mock database fallback.", err);
-  db = new MockDatabase();
-}
-
-const JWT_SECRET = process.env.JWT_SECRET || "claim-guardian-secret-key-123";
-
-// Initialize DB
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT UNIQUE,
-    password TEXT,
-    full_name TEXT,
-    address TEXT,
-    phone TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )
-`);
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS average_prices (
-    code TEXT PRIMARY KEY,
-    description TEXT,
-    avg_price REAL
-  )
-`);
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS audits (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    filename TEXT,
-    total_savings REAL,
-    items_flagged INTEGER,
-    total_items INTEGER,
-    results_json TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(user_id) REFERENCES users(id)
-  )
-`);
-
-// Migration: Add user_id to audits if it doesn't exist (for existing DBs)
-try {
-  db.prepare("SELECT user_id FROM audits LIMIT 1").get();
-} catch (e) {
-  db.exec("ALTER TABLE audits ADD COLUMN user_id INTEGER REFERENCES users(id)");
-}
-
-// Seed some sample data if empty
-const count = db.prepare("SELECT count(*) as count FROM average_prices").get() as { count: number };
-if (count.count === 0) {
-  const insert = db.prepare("INSERT INTO average_prices (code, description, avg_price) VALUES (?, ?, ?)");
-  const seedData = [
-    ["99213", "Office Visit (Level 3)", 120.00],
-    ["99214", "Office Visit (Level 4)", 180.00],
-    ["80053", "Comprehensive Metabolic Panel", 45.00],
-    ["85025", "Complete Blood Count", 30.00],
-    ["71045", "Chest X-Ray", 95.00],
-    ["93000", "EKG", 65.00],
-    ["J0696", "Ceftriaxone Injection", 25.00],
-  ];
-  for (const row of seedData) {
-    insert.run(row[0], row[1], row[2]);
-  }
-}
 
 async function startServer() {
   const app = express();
   const PORT = 3000;
+  const JWT_SECRET = process.env.JWT_SECRET || "claim-guardian-secret-key-123";
+
+  // Initialize DB
+  try {
+    if (process.env.VERCEL === '1') {
+      throw new Error("Running on Vercel, skipping better-sqlite3");
+    }
+    const Database = (await import("better-sqlite3")).default;
+    const dbPath = path.join(process.cwd(), "claims.db");
+    db = new Database(dbPath);
+    console.log(`[DATABASE] Connected to SQLite at ${dbPath}`);
+  } catch (err) {
+    console.error("[DATABASE] Failed to connect to SQLite. Using in-memory mock database fallback.", err);
+    const { MockDatabase } = await import("./mock-db.ts");
+    db = new MockDatabase();
+  }
+
+  // Initialize DB Tables
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT UNIQUE,
+      password TEXT,
+      full_name TEXT,
+      address TEXT,
+      phone TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS average_prices (
+      code TEXT PRIMARY KEY,
+      description TEXT,
+      avg_price REAL
+    )
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS audits (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER,
+      filename TEXT,
+      total_savings REAL,
+      items_flagged INTEGER,
+      total_items INTEGER,
+      results_json TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(user_id) REFERENCES users(id)
+    )
+  `);
+
+  // Migration: Add user_id to audits if it doesn't exist (for existing DBs)
+  try {
+    db.prepare("SELECT user_id FROM audits LIMIT 1").get();
+  } catch (e) {
+    db.exec("ALTER TABLE audits ADD COLUMN user_id INTEGER REFERENCES users(id)");
+  }
+
+  // Seed some sample data if empty
+  const count = db.prepare("SELECT count(*) as count FROM average_prices").get() as { count: number };
+  if (count.count === 0) {
+    const insert = db.prepare("INSERT INTO average_prices (code, description, avg_price) VALUES (?, ?, ?)");
+    const seedData = [
+      ["99213", "Office Visit (Level 3)", 120.00],
+      ["99214", "Office Visit (Level 4)", 180.00],
+      ["80053", "Comprehensive Metabolic Panel", 45.00],
+      ["85025", "Complete Blood Count", 30.00],
+      ["71045", "Chest X-Ray", 95.00],
+      ["93000", "EKG", 65.00],
+      ["J0696", "Ceftriaxone Injection", 25.00],
+    ];
+    for (const row of seedData) {
+      insert.run(row[0], row[1], row[2]);
+    }
+  }
 
   app.use(express.json({ limit: '10mb' }));
   app.use(cookieParser());
